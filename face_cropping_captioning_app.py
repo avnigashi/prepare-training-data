@@ -6,14 +6,15 @@ import requests
 import zipfile
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QListWidget, QLabel, QLineEdit, QRadioButton, 
-                             QProgressBar, QFileDialog, QMessageBox, QGridLayout, QCheckBox)
+                             QProgressBar, QFileDialog, QMessageBox, QGridLayout, QCheckBox,
+                             QTabWidget, QScrollArea)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
 class ImageProcessor(QThread):
     progress_update = pyqtSignal(int)
     status_update = pyqtSignal(str)
 
-    def __init__(self, folders, output_dir, min_width, min_height, generate_captions, caption_limit):
+    def __init__(self, folders, output_dir, min_width, min_height, generate_captions, caption_limit, api_params):
         super().__init__()
         self.folders = folders
         self.output_dir = output_dir
@@ -21,6 +22,7 @@ class ImageProcessor(QThread):
         self.min_height = min_height
         self.generate_captions = generate_captions
         self.caption_limit = caption_limit
+        self.api_params = api_params
 
     def run(self):
         total_files = sum(len([f for f in os.listdir(folder) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]) for folder in self.folders)
@@ -92,18 +94,18 @@ class ImageProcessor(QThread):
             caption_file.write(caption)
 
     def analyze_video_content(self, image_base64):
-        url = "http://host.docker.internal:11434/api/generate"
+        url = self.api_params['url']
 
         payload = {
-            "model": "llava-llama3",
-            "prompt":  "Return tags describing this picture. Use single words or short phrases separated by commas.",
+            "model": self.api_params['model'],
+            "prompt": self.api_params['prompt'],
             "images": [image_base64],
             "options": {
-                "temperature": 0.7,
-                "max_tokens": 1000,
-                "top_p": 1,
-                "frequency_penalty": 0,
-                "presence_penalty": 0
+                "temperature": float(self.api_params['temperature']),
+                "max_tokens": int(self.api_params['max_tokens']),
+                "top_p": float(self.api_params['top_p']),
+                "frequency_penalty": float(self.api_params['frequency_penalty']),
+                "presence_penalty": float(self.api_params['presence_penalty'])
             },
             "stream": False
         }
@@ -140,14 +142,23 @@ class FaceCroppingApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Face Cropping and Captioning App")
-        self.setGeometry(100, 100, 600, 500)
+        self.setGeometry(100, 100, 800, 600)
         self.folders = []
         self.initUI()
 
     def initUI(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        # Create tabs
+        tab_widget = QTabWidget()
+        main_layout.addWidget(tab_widget)
+
+        # Main tab
+        main_tab = QWidget()
+        tab_widget.addTab(main_tab, "Main")
+        layout = QVBoxLayout(main_tab)
 
         # Folder list
         self.folder_list = QListWidget()
@@ -193,18 +204,49 @@ class FaceCroppingApp(QMainWindow):
         caption_layout.addWidget(self.caption_limit)
         layout.addLayout(caption_layout)
 
+        # API Parameters tab
+        api_tab = QWidget()
+        tab_widget.addTab(api_tab, "API Parameters")
+        api_layout = QVBoxLayout(api_tab)
+
+        # Scroll area for API parameters
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+
+        self.api_params = {}
+        for param, default in [
+            ('url', "http://host.docker.internal:11434/api/generate"),
+            ('model', "llava-llama3"),
+            ('prompt', "Return tags describing this picture. Use single words or short phrases separated by commas."),
+            ('temperature', "0.7"),
+            ('max_tokens', "1000"),
+            ('top_p', "1"),
+            ('frequency_penalty', "0"),
+            ('presence_penalty', "0")
+        ]:
+            param_layout = QHBoxLayout()
+            param_layout.addWidget(QLabel(f"{param.capitalize()}:"))
+            self.api_params[param] = QLineEdit(default)
+            param_layout.addWidget(self.api_params[param])
+            scroll_layout.addLayout(param_layout)
+
+        scroll.setWidget(scroll_content)
+        api_layout.addWidget(scroll)
+
         # Process button
         self.process_btn = QPushButton("Process Images")
         self.process_btn.clicked.connect(self.start_processing)
-        layout.addWidget(self.process_btn)
+        main_layout.addWidget(self.process_btn)
 
         # Progress bar
         self.progress_bar = QProgressBar()
-        layout.addWidget(self.progress_bar)
+        main_layout.addWidget(self.progress_bar)
 
         # Status label
         self.status_label = QLabel("")
-        layout.addWidget(self.status_label)
+        main_layout.addWidget(self.status_label)
 
     def add_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder to Process")
@@ -248,13 +290,16 @@ class FaceCroppingApp(QMainWindow):
         # Ensure the output directory exists
         os.makedirs(self.output_dir.text(), exist_ok=True)
 
+        api_params = {param: widget.text() for param, widget in self.api_params.items()}
+
         self.image_processor = ImageProcessor(
             self.folders, 
             self.output_dir.text(), 
             min_width, 
             min_height,
             self.generate_captions.isChecked(),
-            caption_limit
+            caption_limit,
+            api_params
         )
         self.image_processor.progress_update.connect(self.update_progress)
         self.image_processor.status_update.connect(self.update_status)
