@@ -118,8 +118,16 @@ class ImageProcessor(QThread):
         # Prepare the API request
         url = "http://localhost:11434/api/generate"  # Adjust if necessary
         payload = {
-            "model": "llava",
-            "prompt": f"{self.validation_prompt}\n[IMAGE]{image_base64}[/IMAGE]",
+            "model": "llava-llama3",
+            "prompt": self.validation_prompt,
+            "images": [image_base64],
+            "options": {
+                "temperature": 0.7,
+                "max_tokens": 1000,
+                "top_p": 1,
+                "frequency_penalty": 0,
+                "presence_penalty": 0
+            },
             "stream": False
         }
 
@@ -192,11 +200,13 @@ class ImageProcessor(QThread):
 
         self.status_update.emit(f"Training data prepared and saved to {output_zip}")
 
+import json
+
 class FaceCroppingApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Face Cropping and Captioning App")
-        self.setGeometry(100, 100, 1000, 800)  # Increased window size
+        self.setGeometry(100, 100, 1000, 800)
         self.folders = []
         self.initUI()
 
@@ -205,31 +215,32 @@ class FaceCroppingApp(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # Create tabs
         tab_widget = QTabWidget()
         main_layout.addWidget(tab_widget)
 
-        # Main tab
         main_tab = QWidget()
         tab_widget.addTab(main_tab, "Main")
         layout = QVBoxLayout(main_tab)
 
-        # Folder list
         self.folder_list = QListWidget()
         layout.addWidget(QLabel("Folders to Process:"))
         layout.addWidget(self.folder_list)
 
-        # Buttons
         button_layout = QHBoxLayout()
         self.add_folder_btn = QPushButton("Add Folder")
         self.remove_folder_btn = QPushButton("Remove Folder")
+        self.import_settings_btn = QPushButton("Import Settings")  # Added import button
+        self.export_settings_btn = QPushButton("Export Settings")  # Added export button
         self.add_folder_btn.clicked.connect(self.add_folder)
         self.remove_folder_btn.clicked.connect(self.remove_folder)
+        self.import_settings_btn.clicked.connect(self.import_settings)  # Connect import
+        self.export_settings_btn.clicked.connect(self.export_settings)  # Connect export
         button_layout.addWidget(self.add_folder_btn)
         button_layout.addWidget(self.remove_folder_btn)
+        button_layout.addWidget(self.import_settings_btn)  # Add import button to layout
+        button_layout.addWidget(self.export_settings_btn)  # Add export button to layout
         layout.addLayout(button_layout)
 
-        # Output directory
         output_layout = QHBoxLayout()
         self.output_dir = QLineEdit()
         self.browse_btn = QPushButton("Browse")
@@ -239,7 +250,6 @@ class FaceCroppingApp(QMainWindow):
         output_layout.addWidget(self.browse_btn)
         layout.addLayout(output_layout)
 
-        # Minimum size inputs
         size_layout = QGridLayout()
         self.min_width = QLineEdit("0")
         self.min_height = QLineEdit("0")
@@ -249,7 +259,6 @@ class FaceCroppingApp(QMainWindow):
         size_layout.addWidget(self.min_height, 1, 1)
         layout.addLayout(size_layout)
 
-        # Caption generation options
         caption_layout = QHBoxLayout()
         self.generate_captions = QCheckBox("Generate Captions")
         self.caption_limit = QLineEdit("30")
@@ -258,7 +267,6 @@ class FaceCroppingApp(QMainWindow):
         caption_layout.addWidget(self.caption_limit)
         layout.addLayout(caption_layout)
 
-        # AI Validation
         ai_validation_layout = QVBoxLayout()
         self.ai_validation = QCheckBox("AI Validation")
         self.validation_prompt = QLineEdit("Does this image contain a clear, front-facing human face? Answer with yes or no.")
@@ -267,21 +275,17 @@ class FaceCroppingApp(QMainWindow):
         ai_validation_layout.addWidget(self.validation_prompt)
         layout.addLayout(ai_validation_layout)
 
-        # Processed Images List
         self.processed_images_list = QListWidget()
         layout.addWidget(QLabel("Processed Images:"))
         layout.addWidget(self.processed_images_list)
 
-        # Summary Section
         self.summary_label = QLabel("Processing Summary:")
         layout.addWidget(self.summary_label)
 
-        # API Parameters tab
         api_tab = QWidget()
         tab_widget.addTab(api_tab, "API Parameters")
         api_layout = QVBoxLayout(api_tab)
 
-        # Scroll area for API parameters
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll_content = QWidget()
@@ -307,18 +311,54 @@ class FaceCroppingApp(QMainWindow):
         scroll.setWidget(scroll_content)
         api_layout.addWidget(scroll)
 
-        # Process button
         self.process_btn = QPushButton("Process Images")
         self.process_btn.clicked.connect(self.start_processing)
         main_layout.addWidget(self.process_btn)
 
-        # Progress bar
         self.progress_bar = QProgressBar()
         main_layout.addWidget(self.progress_bar)
 
-        # Status label
         self.status_label = QLabel("")
         main_layout.addWidget(self.status_label)
+
+    def import_settings(self):
+        file_name, _ = QFileDialog.getOpenFileName(self, "Import Settings", "", "JSON Files (*.json)")
+        if file_name:
+            with open(file_name, 'r') as file:
+                settings = json.load(file)
+                self.folders = settings.get('folders', [])
+                self.folder_list.clear()
+                for folder in self.folders:
+                    self.folder_list.addItem(folder)
+                self.output_dir.setText(settings.get('output_dir', ''))
+                self.min_width.setText(str(settings.get('min_width', 0)))
+                self.min_height.setText(str(settings.get('min_height', 0)))
+                self.generate_captions.setChecked(settings.get('generate_captions', False))
+                self.caption_limit.setText(str(settings.get('caption_limit', 30)))
+                self.ai_validation.setChecked(settings.get('ai_validation', False))
+                self.validation_prompt.setText(settings.get('validation_prompt', ''))
+                for key, value in settings.get('api_params', {}).items():
+                    if key in self.api_params:
+                        self.api_params[key].setText(value)
+                QMessageBox.information(self, "Settings Imported", "Settings have been successfully imported.")
+
+    def export_settings(self):
+        settings = {
+            'folders': self.folders,
+            'output_dir': self.output_dir.text(),
+            'min_width': int(self.min_width.text()),
+            'min_height': int(self.min_height.text()),
+            'generate_captions': self.generate_captions.isChecked(),
+            'caption_limit': int(self.caption_limit.text()),
+            'ai_validation': self.ai_validation.isChecked(),
+            'validation_prompt': self.validation_prompt.text(),
+            'api_params': {key: widget.text() for key, widget in self.api_params.items()}
+        }
+        file_name, _ = QFileDialog.getSaveFileName(self, "Export Settings", "", "JSON Files (*.json)")
+        if file_name:
+            with open(file_name, 'w') as file:
+                json.dump(settings, file, indent=4)
+            QMessageBox.information(self, "Settings Exported", "Settings have been successfully exported.")
 
     def add_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder to Process")
