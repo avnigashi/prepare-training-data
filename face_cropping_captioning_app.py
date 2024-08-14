@@ -7,14 +7,17 @@ import zipfile
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QListWidget, QLabel, QLineEdit, QRadioButton, 
                              QProgressBar, QFileDialog, QMessageBox, QGridLayout, QCheckBox,
-                             QTabWidget, QScrollArea)
+                             QTabWidget, QScrollArea, QListWidgetItem)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QColor
 
 class ImageProcessor(QThread):
     progress_update = pyqtSignal(int)
     status_update = pyqtSignal(str)
+    image_processed = pyqtSignal(str, bool, str)
+    processing_finished = pyqtSignal(dict)
 
-    def __init__(self, folders, output_dir, min_width, min_height, generate_captions, caption_limit, api_params):
+    def __init__(self, folders, output_dir, min_width, min_height, generate_captions, caption_limit, api_params, ai_validation, validation_prompt):
         super().__init__()
         self.folders = folders
         self.output_dir = output_dir
@@ -23,11 +26,21 @@ class ImageProcessor(QThread):
         self.generate_captions = generate_captions
         self.caption_limit = caption_limit
         self.api_params = api_params
+        self.ai_validation = ai_validation
+        self.validation_prompt = validation_prompt
 
     def run(self):
         total_files = sum(len([f for f in os.listdir(folder) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]) for folder in self.folders)
         processed_files = 0
         caption_count = 0
+        stats = {
+            'total_images': total_files,
+            'faces_found': 0,
+            'no_faces': 0,
+            'small_images': 0,
+            'failed_validation': 0,
+            'processed_successfully': 0
+        }
 
         # Load the pre-trained face detector model
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
@@ -44,6 +57,8 @@ class ImageProcessor(QThread):
                     height, width = image.shape[:2]
                     if width < self.min_width or height < self.min_height:
                         print(f"Ignoring {image_file} due to small size ({width}x{height})")
+                        stats['small_images'] += 1
+                        self.image_processed.emit(image_file, False, "Small image")
                         processed_files += 1
                         self.progress_update.emit(int((processed_files / total_files) * 100))
                         continue
@@ -54,11 +69,22 @@ class ImageProcessor(QThread):
                     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
                     
                     if len(faces) > 0:
+                        stats['faces_found'] += 1
                         # Crop the first detected face
                         (x, y, w, h) = faces[0]
                         cropped_face = image[y:y+h, x:x+w]
                         cropped_path = os.path.join(self.output_dir, image_file)
                         
+                        # AI Validation
+                        if self.ai_validation:
+                            if not self.validate_image(cropped_face):
+                                print(f"Image {image_file} did not pass AI validation")
+                                stats['failed_validation'] += 1
+                                self.image_processed.emit(image_file, False, "Failed AI validation")
+                                processed_files += 1
+                                self.progress_update.emit(int((processed_files / total_files) * 100))
+                                continue
+
                         # Save the cropped face image
                         cv2.imwrite(cropped_path, cropped_face)
                         print(f"Cropped face saved to {cropped_path}")
@@ -67,8 +93,13 @@ class ImageProcessor(QThread):
                         if self.generate_captions and (self.caption_limit is None or caption_count < self.caption_limit):
                             self.generate_caption(cropped_path)
                             caption_count += 1
+
+                        stats['processed_successfully'] += 1
+                        self.image_processed.emit(image_file, True, "Processed successfully")
                     else:
                         print(f"No face detected in {image_file}")
+                        stats['no_faces'] += 1
+                        self.image_processed.emit(image_file, False, "No face detected")
 
                     processed_files += 1
                     self.progress_update.emit(int((processed_files / total_files) * 100))
@@ -77,6 +108,29 @@ class ImageProcessor(QThread):
             self.prepare_training_data()
 
         self.status_update.emit("Processing complete!")
+        self.processing_finished.emit(stats)
+
+    def validate_image(self, image):
+        # Convert image to base64
+        _, buffer = cv2.imencode('.jpg', image)
+        image_base64 = base64.b64encode(buffer).decode('utf-8')
+
+        # Prepare the API request
+        url = "http://localhost:11434/api/generate"  # Adjust if necessary
+        payload = {
+            "model": "llava",
+            "prompt": f"{self.validation_prompt}\n[IMAGE]{image_base64}[/IMAGE]",
+            "stream": False
+        }
+
+        # Send the request
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()['response'].lower()
+            return "yes" in result or "true" in result
+        else:
+            print(f"Error in AI validation: {response.status_code} - {response.text}")
+            return False
 
     def generate_caption(self, image_path):
         with open(image_path, "rb") as file:
@@ -142,7 +196,7 @@ class FaceCroppingApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Face Cropping and Captioning App")
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(100, 100, 1000, 800)  # Increased window size
         self.folders = []
         self.initUI()
 
@@ -204,6 +258,24 @@ class FaceCroppingApp(QMainWindow):
         caption_layout.addWidget(self.caption_limit)
         layout.addLayout(caption_layout)
 
+        # AI Validation
+        ai_validation_layout = QVBoxLayout()
+        self.ai_validation = QCheckBox("AI Validation")
+        self.validation_prompt = QLineEdit("Does this image contain a clear, front-facing human face? Answer with yes or no.")
+        ai_validation_layout.addWidget(self.ai_validation)
+        ai_validation_layout.addWidget(QLabel("Validation Prompt:"))
+        ai_validation_layout.addWidget(self.validation_prompt)
+        layout.addLayout(ai_validation_layout)
+
+        # Processed Images List
+        self.processed_images_list = QListWidget()
+        layout.addWidget(QLabel("Processed Images:"))
+        layout.addWidget(self.processed_images_list)
+
+        # Summary Section
+        self.summary_label = QLabel("Processing Summary:")
+        layout.addWidget(self.summary_label)
+
         # API Parameters tab
         api_tab = QWidget()
         tab_widget.addTab(api_tab, "API Parameters")
@@ -217,7 +289,7 @@ class FaceCroppingApp(QMainWindow):
 
         self.api_params = {}
         for param, default in [
-            ('url', "http://host.docker.internal:11434/api/generate"),
+            ('url', "http://localhost:11434/api/generate"),
             ('model', "llava-llama3"),
             ('prompt', "Return tags describing this picture. Use single words or short phrases separated by commas."),
             ('temperature', "0.7"),
@@ -287,6 +359,9 @@ class FaceCroppingApp(QMainWindow):
             QMessageBox.warning(self, "Invalid Input", "Please enter valid integers for minimum width, height, and caption limit.")
             return
 
+        # Clear the processed images list
+        self.processed_images_list.clear()
+
         # Ensure the output directory exists
         os.makedirs(self.output_dir.text(), exist_ok=True)
 
@@ -299,10 +374,14 @@ class FaceCroppingApp(QMainWindow):
             min_height,
             self.generate_captions.isChecked(),
             caption_limit,
-            api_params
+            api_params,
+            self.ai_validation.isChecked(),
+            self.validation_prompt.text()
         )
         self.image_processor.progress_update.connect(self.update_progress)
         self.image_processor.status_update.connect(self.update_status)
+        self.image_processor.image_processed.connect(self.update_image_list)
+        self.image_processor.processing_finished.connect(self.show_summary)
         self.image_processor.start()
 
     def update_progress(self, value):
@@ -310,6 +389,25 @@ class FaceCroppingApp(QMainWindow):
 
     def update_status(self, message):
         self.status_label.setText(message)
+
+    def update_image_list(self, image_name, success, reason):
+        item = QListWidgetItem(f"{image_name} - {reason}")
+        if not success:
+            item.setBackground(QColor(255, 200, 200))  # Light red background for failed images
+        self.processed_images_list.addItem(item)
+
+    def show_summary(self, stats):
+        summary = f"""
+        Processing Summary:
+        Total Images: {stats['total_images']}
+        Faces Found: {stats['faces_found']}
+        No Faces Detected: {stats['no_faces']}
+        Small Images Skipped: {stats['small_images']}
+        Failed AI Validation: {stats['failed_validation']}
+        Successfully Processed: {stats['processed_successfully']}
+        """
+        self.summary_label.setText(summary)
+        QMessageBox.information(self, "Processing Complete", summary)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
